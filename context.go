@@ -23,6 +23,7 @@ type frankenPHPContext struct {
 	pathInfo       string
 	scriptName     string
 	scriptFilename string
+	workerName     string
 
 	// Whether the request is already closed by us
 	isDone bool
@@ -161,4 +162,12 @@ func (fc *frankenPHPContext) reject(statusCode int, message string) {
 
 func (fc *frankenPHPContext) rejectBadRequest(message string) {
 	fc.reject(http.StatusBadRequest, message)
+}
+
+func (fc *frankenPHPContext) worker() string {
+	if fc.workerName != "" {
+		return fc.workerName
+	}
+
+	return fc.scriptFilename
 }

@@ -74,6 +74,10 @@ func newWorker(o workerOpt) (*worker, error) {
 		o.env = make(PreparedEnv, 1)
 	}
 
+	if o.name == "" {
+		o.name = absFileName
+	}
+
 	o.env["FRANKENPHP_WORKER\x00"] = "1"
 	w := &worker{
 		name:        o.name,
@@ -82,7 +86,7 @@ func newWorker(o workerOpt) (*worker, error) {
 		env:         o.env,
 		requestChan: make(chan *frankenPHPContext),
 	}
-	workers[absFileName] = w
+	workers[w.name] = w
 
 	return w, nil
 }

@@ -63,7 +63,7 @@ type FrankenPHPApp struct {
 	// MaxThreads limits how many threads can be started at runtime. Default 2x NumThreads
 	MaxThreads int `json:"max_threads,omitempty"`
 	// Workers configures the worker scripts to start.
-	Workers []workerConfig `json:"workers,omitempty"`
+	Workers map[string]workerConfig `json:"workers,omitempty"`
 	// Overwrites the default php ini configuration
 	PhpIni map[string]string `json:"php_ini,omitempty"`
 	// The maximum amount of time a request may be stalled waiting for a thread
@@ -108,8 +108,8 @@ func (f *FrankenPHPApp) Start() error {
 		frankenphp.WithPhpIni(f.PhpIni),
 		frankenphp.WithMaxWaitTime(f.MaxWaitTime),
 	}
-	for _, w := range f.Workers {
-		opts = append(opts, frankenphp.WithWorkers(w.Name, repl.ReplaceKnown(w.FileName, ""), w.Num, w.Env, w.Watch))
+	for name, w := range f.Workers {
+		opts = append(opts, frankenphp.WithWorkers(name, repl.ReplaceKnown(w.FileName, ""), w.Num, w.Env, w.Watch))
 	}
 
 	frankenphp.Shutdown()
@@ -219,92 +219,18 @@ func (f *FrankenPHPApp) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				}
 
 			case "worker":
-				wc := workerConfig{}
-				if d.NextArg() {
-					wc.FileName = d.Val()
+				wc, err := parseWorkerHelper(d)
+				if err != nil {
+					return err
 				}
-
-				if d.NextArg() {
-					if d.Val() == "watch" {
-						wc.Watch = append(wc.Watch, "./**/*.{php,yaml,yml,twig,env}")
-					} else {
-						v, err := strconv.Atoi(d.Val())
-						if err != nil {
-							return err
-						}
-
-						wc.Num = v
-					}
+				if f.Workers == nil {
+					f.Workers = make(map[string]workerConfig)
 				}
-
-				if d.NextArg() {
-					return errors.New("FrankenPHP: too many 'worker' arguments: " + d.Val())
+				absFileName, err := fastabs.FastAbs(wc.FileName)
+				if err != nil {
+					absFileName = wc.FileName
 				}
-
-				for d.NextBlock(1) {
-					v := d.Val()
-					switch v {
-					case "name":
-						if !d.NextArg() {
-							return d.ArgErr()
-						}
-						wc.Name = d.Val()
-					case "file":
-						if !d.NextArg() {
-							return d.ArgErr()
-						}
-						wc.FileName = d.Val()
-					case "num":
-						if !d.NextArg() {
-							return d.ArgErr()
-						}
-
-						v, err := strconv.Atoi(d.Val())
-						if err != nil {
-							return err
-						}
-
-						wc.Num = v
-					case "env":
-						args := d.RemainingArgs()
-						if len(args) != 2 {
-							return d.ArgErr()
-						}
-						if wc.Env == nil {
-							wc.Env = make(map[string]string)
-						}
-						wc.Env[args[0]] = args[1]
-					case "watch":
-						if !d.NextArg() {
-							// the default if the watch directory is left empty:
-							wc.Watch = append(wc.Watch, "./**/*.{php,yaml,yml,twig,env}")
-						} else {
-							wc.Watch = append(wc.Watch, d.Val())
-						}
-					default:
-						allowedDirectives := "name, file, num, env, watch"
-						return wrongSubDirectiveError("worker", allowedDirectives, v)
-					}
-				}
-
-				if wc.FileName == "" {
-					return errors.New(`the "file" argument must be specified`)
-				}
-
-				if frankenphp.EmbeddedAppPath != "" && filepath.IsLocal(wc.FileName) {
-					wc.FileName = filepath.Join(frankenphp.EmbeddedAppPath, wc.FileName)
-				}
-
-				if wc.Name == "" {
-					// let worker initialization validate if the FileName is valid or not
-					name, _ := fastabs.FastAbs(wc.FileName)
-					if name == "" {
-						name = wc.FileName
-					}
-					wc.Name = name
-				}
-
-				f.Workers = append(f.Workers, wc)
+				f.Workers[absFileName] = wc
 			default:
 				allowedDirectives := "num_threads, max_threads, php_ini, worker, max_wait_time"
 				return wrongSubDirectiveError("frankenphp", allowedDirectives, d.Val())
@@ -341,6 +267,11 @@ type FrankenPHPModule struct {
 	ResolveRootSymlink *bool `json:"resolve_root_symlink,omitempty"`
 	// Env sets an extra environment variable to the given value. Can be specified more than once for multiple environment variables.
 	Env map[string]string `json:"env,omitempty"`
+	// Workers configures the worker scripts to start.
+	Worker workerConfig `json:"worker,omitempty"`
+	// WorkerName sets the name of the worker to use.
+	// WorkerName string `json:"worker_name,omitempty"`
+	WorkerName string `json:"worker_name,omitempty"`
 
 	resolvedDocumentRoot        string
 	preparedEnv                 frankenphp.PreparedEnv
@@ -412,6 +343,28 @@ func (f *FrankenPHPModule) Provision(ctx caddy.Context) error {
 		}
 	}
 
+	frankenPHPAppIface, err := ctx.AppIfConfigured("frankenphp")
+	frankenPHPApp := frankenPHPAppIface.(*FrankenPHPApp)
+
+	if err != nil {
+		return errors.New("frankenphp module is not configured")
+	}
+
+	if f.Worker.FileName == "" {
+		// we will determine the worker on request
+		f.WorkerName = ""
+	} else {
+		var workerName string
+		// if user choose its own worker name then use it otherwise use the auto-generated worker name
+		if f.Worker.Name != "" {
+			workerName = f.Worker.Name
+		} else {
+			workerName = f.WorkerName
+		}
+		f.WorkerName = workerName
+		frankenPHPApp.Workers[workerName] = f.Worker
+	}
+
 	return nil
 }
 
@@ -447,6 +400,7 @@ func (f FrankenPHPModule) ServeHTTP(w http.ResponseWriter, r *http.Request, _ ca
 		frankenphp.WithRequestSplitPath(f.SplitPath),
 		frankenphp.WithRequestPreparedEnv(env),
 		frankenphp.WithOriginalRequest(&origReq),
+		frankenphp.WithWorkerName(f.WorkerName),
 	)
 
 	if err != nil {
@@ -504,8 +458,14 @@ func (f *FrankenPHPModule) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				}
 
 				f.ResolveRootSymlink = &v
+			case "worker":
+				wc, err := parseWorkerHelper(d)
+				if err != nil {
+					return err
+				}
+				f.Worker = wc
 			default:
-				allowedDirectives := "root, split, env, resolve_root_symlink"
+				allowedDirectives := "root, split, env, resolve_root_symlink, worker"
 				return wrongSubDirectiveError("php or php_server", allowedDirectives, d.Val())
 			}
 		}
@@ -516,8 +476,16 @@ func (f *FrankenPHPModule) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 
 // parseCaddyfile unmarshals tokens from h into a new Middleware.
 func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
-	m := FrankenPHPModule{}
+	workerCounter, ok := h.State["workerCounter"].(int)
+	if !ok {
+		workerCounter = 0
+	}
+
+	m := FrankenPHPModule{WorkerName: fmt.Sprintf("__autogenerated_worker%d", workerCounter)}
 	err := m.UnmarshalCaddyfile(h.Dispenser)
+
+	workerCounter++
+	h.State["workerCounter"] = workerCounter
 
 	return m, err
 }
@@ -554,8 +522,17 @@ func parsePhpServer(h httpcaddyfile.Helper) ([]httpcaddyfile.ConfigValue, error)
 		return nil, h.ArgErr()
 	}
 
+	workerCounter, ok := h.State["workerCounter"].(int)
+	if !ok {
+		workerCounter = 0
+	}
+
+	phpsrv := FrankenPHPModule{WorkerName: fmt.Sprintf("__autogenerated_worker%d", workerCounter)}
+
+	workerCounter++
+	h.State["workerCounter"] = workerCounter
+
 	// set up FrankenPHP
-	phpsrv := FrankenPHPModule{}
 
 	// set up file server
 	fsrv := fileserver.FileServer{}
@@ -807,6 +784,86 @@ func parsePhpServer(h httpcaddyfile.Helper) ([]httpcaddyfile.ConfigValue, error)
 // return a nice error message
 func wrongSubDirectiveError(module string, allowedDriectives string, wrongValue string) error {
 	return fmt.Errorf("unknown '%s' subdirective: '%s' (allowed directives are: %s)", module, wrongValue, allowedDriectives)
+}
+
+func parseWorkerHelper(d *caddyfile.Dispenser) (workerConfig, error) {
+	wc := workerConfig{}
+	if d.NextArg() {
+		wc.FileName = d.Val()
+	}
+
+	if d.NextArg() {
+		if d.Val() == "watch" {
+			wc.Watch = append(wc.Watch, "./**/*.{php,yaml,yml,twig,env}")
+		} else {
+			v, err := strconv.Atoi(d.Val())
+			if err != nil {
+				return wc, err
+			}
+
+			wc.Num = v
+		}
+	}
+
+	if d.NextArg() {
+		return wc, errors.New("FrankenPHP: too many 'worker' arguments: " + d.Val())
+	}
+
+	for d.NextBlock(1) {
+		v := d.Val()
+		switch v {
+		case "name":
+			if !d.NextArg() {
+				return wc, d.ArgErr()
+			}
+			wc.Name = d.Val()
+		case "file":
+			if !d.NextArg() {
+				return wc, d.ArgErr()
+			}
+			wc.FileName = d.Val()
+		case "num":
+			if !d.NextArg() {
+				return wc, d.ArgErr()
+			}
+
+			v, err := strconv.Atoi(d.Val())
+			if err != nil {
+				return wc, err
+			}
+
+			wc.Num = v
+		case "env":
+			args := d.RemainingArgs()
+			if len(args) != 2 {
+				return wc, d.ArgErr()
+			}
+			if wc.Env == nil {
+				wc.Env = make(map[string]string)
+			}
+			wc.Env[args[0]] = args[1]
+		case "watch":
+			if !d.NextArg() {
+				// the default if the watch directory is left empty:
+				wc.Watch = append(wc.Watch, "./**/*.{php,yaml,yml,twig,env}")
+			} else {
+				wc.Watch = append(wc.Watch, d.Val())
+			}
+		default:
+			allowedDirectives := "name, file, num, env, watch"
+			return wc, wrongSubDirectiveError("worker", allowedDirectives, v)
+		}
+	}
+
+	if wc.FileName == "" {
+		return wc, errors.New(`the "file" argument must be specified`)
+	}
+
+	if frankenphp.EmbeddedAppPath != "" && filepath.IsLocal(wc.FileName) {
+		wc.FileName = filepath.Join(frankenphp.EmbeddedAppPath, wc.FileName)
+	}
+
+	return wc, nil
 }
 
 // Interface guards

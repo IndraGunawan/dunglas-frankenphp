@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -405,10 +406,15 @@ func ServeHTTP(responseWriter http.ResponseWriter, request *http.Request) error 
 	}
 
 	// Detect if a worker is available to handle this request
-	if worker, ok := workers[fc.scriptFilename]; ok {
+	if worker, ok := workers[fc.worker()]; ok {
+		log.Print("@@ adanya")
 		worker.handleRequest(fc)
 		return nil
 	}
+
+	log.Print("@@ gak ada woy")
+	log.Print(fc.worker())
+	log.Printf("%+v\n", workers)
 
 	// If no worker was availabe send the request to non-worker threads
 	handleRequestWithRegularPHPThreads(fc)

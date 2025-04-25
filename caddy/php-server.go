@@ -79,10 +79,10 @@ func cmdPHPServer(fs caddycmd.Flags) (int, error) {
 		panic(err)
 	}
 
-	var workersOption []workerConfig
+	var workersOption map[string]workerConfig
 	if len(workers) != 0 {
-		workersOption = make([]workerConfig, 0, len(workers))
-		for _, worker := range workers {
+		workersOption = make(map[string]workerConfig)
+		for i, worker := range workers {
 			parts := strings.SplitN(worker, ",", 2)
 			if frankenphp.EmbeddedAppPath != "" && filepath.IsLocal(parts[0]) {
 				parts[0] = filepath.Join(frankenphp.EmbeddedAppPath, parts[0])
@@ -93,9 +93,12 @@ func cmdPHPServer(fs caddycmd.Flags) (int, error) {
 				num, _ = strconv.Atoi(parts[1])
 			}
 
-			workersOption = append(workersOption, workerConfig{FileName: parts[0], Num: num})
+			wc := workerConfig{FileName: parts[0], Num: num}
+			if i == 0 {
+				wc.Watch = watch
+			}
+			workersOption[wc.FileName] = wc
 		}
-		workersOption[0].Watch = watch
 	}
 
 	if frankenphp.EmbeddedAppPath != "" {

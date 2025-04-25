@@ -1,11 +1,12 @@
 package frankenphp
 
 import (
-	"github.com/dunglas/frankenphp/internal/fastabs"
 	"net/http"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+
+	"github.com/dunglas/frankenphp/internal/fastabs"
 
 	"go.uber.org/zap"
 )
@@ -119,6 +120,14 @@ func WithOriginalRequest(r *http.Request) RequestOption {
 func WithRequestLogger(logger *zap.Logger) RequestOption {
 	return func(o *frankenPHPContext) error {
 		o.logger = logger
+
+		return nil
+	}
+}
+
+func WithWorkerName(workerName string) RequestOption {
+	return func(o *frankenPHPContext) error {
+		o.workerName = workerName
 
 		return nil
 	}
